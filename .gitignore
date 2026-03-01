@@ -1,0 +1,4 @@
+revanity-go
+*.identity
+*.txt
+!README.md
