@@ -5,8 +5,8 @@ Vanity address generator for [Reticulum](https://reticulum.network) & LXMF netwo
 ## Install
 
 ```
-git clone https://github.com/defidude/dude.eth.git
-cd dude.eth
+git clone https://github.com/defidude/revanity-go.git
+cd revanity-go
 go build -o revanity-go
 ```
 
