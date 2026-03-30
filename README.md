@@ -1,15 +1,35 @@
+<div align="center">
+
 # revanity-go
 
-Vanity address generator for [Reticulum](https://reticulum.network) & LXMF networks. Pure Go, zero dependencies.
+**Vanity address generator for [Reticulum](https://reticulum.network) and LXMF networks.**
 
-Generate custom Reticulum destination hashes that start with, end with, or contain a specific hex pattern — useful for memorable node addresses.
+[![Go 1.20+](https://img.shields.io/badge/go-1.20+-00ADD8.svg)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Status: Stable](https://img.shields.io/badge/status-stable-brightgreen.svg)](https://github.com/ratspeak/revanity-go)
+
+</div>
+
+---
+
+Brute-forces cryptographic key pairs in parallel until it finds one whose destination hash matches your pattern. Uses libsodium's hand-optimized ARM64 assembly for X25519 scalar multiplication on Apple Silicon.
 
 ## Install
 
+Requires [libsodium](https://doc.libsodium.org/installation) and Go 1.20+.
+
 ```bash
-git clone https://github.com/ratspeak/revanity-go
+# macOS
+brew install libsodium
+
+# Linux (Debian/Ubuntu)
+sudo apt install libsodium-dev
+```
+
+```bash
+git clone https://github.com/ratspeak/revanity-go.git
 cd revanity-go
-go build -o revanity-go
+CGO_ENABLED=1 go build -o revanity-go
 ```
 
 ## Usage
@@ -24,17 +44,31 @@ go build -o revanity-go
 ./revanity-go -regex "^(dead|beef)"
 
 # Options
-./revanity-go -prefix dead -workers 8       # set worker count
-./revanity-go -prefix dead -dest nomadnetwork.node  # different dest type
-./revanity-go -prefix deadbeef -dry-run     # estimate difficulty only
-./revanity-go -prefix dead -quiet           # output address only
-./revanity-go -prefix dead -output mykey    # custom output filename
+./revanity-go -prefix dead -workers 8                # set worker count
+./revanity-go -prefix dead -dest nomadnetwork.node   # different dest type
+./revanity-go -prefix deadbeef -dry-run              # estimate difficulty only
+./revanity-go -prefix dead -quiet                    # output address only
 ```
+
+## Loop Mode
+
+Search continuously, collecting every match instead of stopping at the first one.
+
+```bash
+./revanity-go -prefix dead -loop
+./revanity-go -prefix dead -loop -output my_results   # custom output directory
+```
+
+Results are saved to `results/` (or the directory specified by `-output`):
+
+- `prefix_dead.jsonl` — one JSON object per line with dest hash, identity hash, private key (hex/base32/base64), all destination hashes, and metadata. Append-safe across runs.
+- `<dest_hash>.identity` — individual 64-byte binary keys for direct import into Sideband, Nomadnet, or any RNS application.
 
 ## Output
 
-On match, two files are saved:
-- `<address>.identity` — 64-byte binary key (import directly into Sideband, NomadNet, or any RNS app)
+In single mode (without `-loop`), two files are saved on match:
+
+- `<address>.identity` — 64-byte binary key (import directly into Sideband/Nomadnet/any RNS app)
 - `<address>.txt` — human-readable info with private key formats and import instructions
 
 ## How It Works
@@ -47,10 +81,6 @@ Reticulum addresses are truncated SHA-256 hashes of Ed25519/X25519 public keys. 
 | 6 chars | ~17M | minutes |
 | 8 chars | ~4.3B | hours |
 
-## Requirements
-
-Go 1.20+
-
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE).
+MIT
