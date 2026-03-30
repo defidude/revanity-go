@@ -127,6 +127,7 @@ func saveIdentityText(export *exportedIdentity, path string) (string, error) {
 type resultEntry struct {
 	DestHash         string            `json:"dest_hash"`
 	IdentityHash     string            `json:"identity_hash"`
+	Pattern          string            `json:"pattern"`
 	DestHashes       map[string]string `json:"dest_hashes"`
 	PrivateKeyHex    string            `json:"private_key_hex"`
 	PrivateKeyBase32 string            `json:"private_key_base32"`
@@ -142,6 +143,7 @@ func appendResultJSONL(path string, export *exportedIdentity, result *generatorR
 	entry := resultEntry{
 		DestHash:         result.DestHashHex,
 		IdentityHash:     export.IdentityHashHex,
+		Pattern:          result.PatternStr,
 		DestHashes:       export.DestHashes,
 		PrivateKeyHex:    export.PrivateKeyHex,
 		PrivateKeyBase32: export.PrivateKeyBase32,

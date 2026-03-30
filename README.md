@@ -50,6 +50,17 @@ CGO_ENABLED=1 go build -o revanity-go
 ./revanity-go -prefix dead -quiet                    # output address only
 ```
 
+## Multi-Pattern Search
+
+Search for multiple patterns at once with comma-separated values. Stops automatically when every pattern has at least one match. Duplicates found along the way are saved too.
+
+```bash
+./revanity-go -prefix aa,bb,cc
+./revanity-go -prefix dead,beef,cafe,babe   # find all four
+```
+
+Combine with `-loop` to keep going after all patterns are satisfied.
+
 ## Loop Mode
 
 Search continuously, collecting every match instead of stopping at the first one.
@@ -59,9 +70,9 @@ Search continuously, collecting every match instead of stopping at the first one
 ./revanity-go -prefix dead -loop -output my_results   # custom output directory
 ```
 
-Results are saved to `results/` (or the directory specified by `-output`):
+Both multi-pattern and loop mode save results to `results/` (or the directory specified by `-output`):
 
-- `prefix_dead.jsonl` — one JSON object per line with dest hash, identity hash, private key (hex/base32/base64), all destination hashes, and metadata. Append-safe across runs.
+- `<mode>_<patterns>.jsonl` — one JSON object per line with dest hash, identity hash, matched pattern, private key (hex/base32/base64), all destination hashes, and metadata. Append-safe across runs.
 - `<dest_hash>.identity` — individual 64-byte binary keys for direct import into Sideband, Nomadnet, or any RNS application.
 
 ## Output

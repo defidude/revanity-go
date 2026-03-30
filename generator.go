@@ -16,6 +16,8 @@ type generatorResult struct {
 	IdentityHash [16]byte
 	DestHashHex  string
 	DestType     string
+	PatternIdx   int
+	PatternStr   string
 	Elapsed      time.Duration
 	TotalChecked uint64
 	Rate         float64
@@ -31,11 +33,11 @@ type generatorStats struct {
 
 // vanityGenerator orchestrates parallel vanity address generation using goroutines.
 type vanityGenerator struct {
-	PatternStr string
-	Pattern    *compiledPattern
-	NameHash   []byte
-	DestType   string
-	NumWorkers int
+	PatternStrs []string
+	Patterns    []*compiledPattern
+	NameHash    []byte
+	DestType    string
+	NumWorkers  int
 
 	loopMode  bool
 	counter   atomic.Uint64
@@ -47,10 +49,16 @@ type vanityGenerator struct {
 }
 
 // newVanityGenerator creates a new generator, validating inputs.
-func newVanityGenerator(pattern string, mode matchMode, destType string, numWorkers int) (*vanityGenerator, error) {
-	cp, err := newCompiledPattern(mode, pattern)
-	if err != nil {
-		return nil, err
+func newVanityGenerator(patterns []string, mode matchMode, destType string, numWorkers int) (*vanityGenerator, error) {
+	compiled := make([]*compiledPattern, len(patterns))
+	cleanedStrs := make([]string, len(patterns))
+	for i, p := range patterns {
+		cp, err := newCompiledPattern(mode, p)
+		if err != nil {
+			return nil, fmt.Errorf("pattern %d (%q): %w", i+1, p, err)
+		}
+		compiled[i] = cp
+		cleanedStrs[i] = cp.pattern
 	}
 
 	nameHash, ok := destNameHashes[destType]
@@ -69,11 +77,11 @@ func newVanityGenerator(pattern string, mode matchMode, destType string, numWork
 	}
 
 	return &vanityGenerator{
-		PatternStr: cp.pattern,
-		Pattern:    cp,
-		NameHash:   nameHash,
-		DestType:   destType,
-		NumWorkers: numWorkers,
+		PatternStrs: cleanedStrs,
+		Patterns:    compiled,
+		NameHash:    nameHash,
+		DestType:    destType,
+		NumWorkers:  numWorkers,
 	}, nil
 }
 
@@ -100,7 +108,7 @@ func (g *vanityGenerator) worker() {
 	defer g.wg.Done()
 
 	w := newWorkerState(g.NameHash)
-	pattern := g.Pattern
+	patterns := g.Patterns
 	const batchSize = 500
 
 	for {
@@ -112,7 +120,7 @@ func (g *vanityGenerator) worker() {
 
 		found := false
 		for i := 0; i < batchSize; i++ {
-			result, matched := w.generateAndCheck(pattern)
+			result, matched := w.generateAndCheck(patterns)
 			if matched {
 				g.counter.Add(uint64(i + 1))
 				if g.loopMode {
@@ -186,6 +194,8 @@ func (g *vanityGenerator) runBlocking(parentCtx context.Context, progressInterva
 				IdentityHash: result.IdentityHash,
 				DestHashHex:  result.DestHex,
 				DestType:     g.DestType,
+				PatternIdx:   result.PatternIdx,
+				PatternStr:   g.PatternStrs[result.PatternIdx],
 				Elapsed:      elapsed,
 				TotalChecked: total,
 				Rate:         rate,
@@ -228,6 +238,8 @@ func (g *vanityGenerator) runLoop(parentCtx context.Context, progressInterval ti
 				IdentityHash: result.IdentityHash,
 				DestHashHex:  result.DestHex,
 				DestType:     g.DestType,
+				PatternIdx:   result.PatternIdx,
+				PatternStr:   g.PatternStrs[result.PatternIdx],
 				Elapsed:      elapsed,
 				TotalChecked: total,
 				Rate:         rate,

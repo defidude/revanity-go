@@ -68,7 +68,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "revanity-go - Reticulum/LXMF Vanity Address Generator\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: revanity-go [options]\n\n")
-		fmt.Fprintf(os.Stderr, "Pattern (exactly one required):\n")
+		fmt.Fprintf(os.Stderr, "Pattern (exactly one required, comma-separated for multi-pattern):\n")
 		fmt.Fprintf(os.Stderr, "  -prefix, -p HEX      Find address starting with hex string\n")
 		fmt.Fprintf(os.Stderr, "  -suffix, -s HEX      Find address ending with hex string\n")
 		fmt.Fprintf(os.Stderr, "  -contains, -c HEX    Find address containing hex string\n")
@@ -87,6 +87,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  revanity-go -contains beef\n")
 		fmt.Fprintf(os.Stderr, "  revanity-go -regex \"^(dead|beef)\"\n")
 		fmt.Fprintf(os.Stderr, "  revanity-go -prefix dead -loop    # find all matches continuously\n")
+		fmt.Fprintf(os.Stderr, "  revanity-go -prefix aa,bb,cc      # find all three patterns\n")
 	}
 
 	flag.Parse()
@@ -98,27 +99,27 @@ func main() {
 
 	// Determine mode and pattern (exactly one must be set)
 	var mode matchMode
-	var pattern string
+	var patternRaw string
 	set := 0
 
 	if *prefix != "" {
 		mode = modePrefix
-		pattern = *prefix
+		patternRaw = *prefix
 		set++
 	}
 	if *suffix != "" {
 		mode = modeSuffix
-		pattern = *suffix
+		patternRaw = *suffix
 		set++
 	}
 	if *contains != "" {
 		mode = modeContains
-		pattern = *contains
+		patternRaw = *contains
 		set++
 	}
 	if *regex != "" {
 		mode = modeRegex
-		pattern = *regex
+		patternRaw = *regex
 		set++
 	}
 
@@ -132,27 +133,42 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Split comma-separated patterns
+	patterns := strings.Split(patternRaw, ",")
+	for i := range patterns {
+		patterns[i] = strings.TrimSpace(patterns[i])
+	}
+
 	// Create generator
-	gen, err := newVanityGenerator(pattern, mode, *dest, *workers)
+	gen, err := newVanityGenerator(patterns, mode, *dest, *workers)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	diff := estimateDifficulty(mode, gen.PatternStr)
+	multiMode := len(gen.PatternStrs) > 1
 
 	if !*quiet {
 		fmt.Printf("revanity-go v%s\n", version)
-		fmt.Printf("  Pattern:     %s='%s'\n", mode, gen.PatternStr)
+		if multiMode {
+			fmt.Printf("  Patterns:    %s=[%s] (%d patterns)\n", mode, strings.Join(gen.PatternStrs, ", "), len(gen.PatternStrs))
+		} else {
+			fmt.Printf("  Pattern:     %s='%s'\n", mode, gen.PatternStrs[0])
+		}
 		fmt.Printf("  Destination: %s\n", *dest)
 		fmt.Printf("  Workers:     %d\n", gen.NumWorkers)
 		if *loop {
 			fmt.Printf("  Mode:        continuous (loop)\n")
+		} else if multiMode {
+			fmt.Printf("  Mode:        multi-pattern (stops when all found)\n")
 		}
-		if diff.CanEstimate {
-			fmt.Printf("  Expected:    ~%s attempts per match\n", formatNumber(diff.ExpectedAttempts))
+		if !multiMode {
+			diff := estimateDifficulty(mode, gen.PatternStrs[0])
+			if diff.CanEstimate {
+				fmt.Printf("  Expected:    ~%s attempts per match\n", formatNumber(diff.ExpectedAttempts))
+			}
+			fmt.Printf("  Difficulty:  %s\n", diff.DifficultyDesc)
 		}
-		fmt.Printf("  Difficulty:  %s\n", diff.DifficultyDesc)
 		fmt.Println()
 	}
 
@@ -164,8 +180,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if *loop {
-		runLoopMode(gen, ctx, mode, *output, *quiet)
+	if *loop || multiMode {
+		runLoopMode(gen, ctx, mode, *output, *quiet, *loop, multiMode)
 		return
 	}
 
@@ -243,7 +259,7 @@ func main() {
 	}
 }
 
-func runLoopMode(gen *vanityGenerator, ctx context.Context, mode matchMode, output string, quiet bool) {
+func runLoopMode(gen *vanityGenerator, ctx context.Context, mode matchMode, output string, quiet bool, loop bool, multiMode bool) {
 	outDir := output
 	if outDir == "" {
 		outDir = "results"
@@ -253,28 +269,56 @@ func runLoopMode(gen *vanityGenerator, ctx context.Context, mode matchMode, outp
 		os.Exit(1)
 	}
 
-	jsonlPath := filepath.Join(outDir, fmt.Sprintf("%s_%s.jsonl", mode, gen.PatternStr))
+	jsonlPath := filepath.Join(outDir, fmt.Sprintf("%s_%s.jsonl", mode, strings.Join(gen.PatternStrs, ",")))
 	foundCount := 0
 
+	// Track which patterns have been satisfied (for multi-pattern auto-stop)
+	foundPerPattern := make(map[int]int) // patternIdx -> count
+	totalPatterns := len(gen.PatternStrs)
+
+	// Wrap context so we can cancel when all patterns are found
+	searchCtx, searchCancel := context.WithCancel(ctx)
+	defer searchCancel()
+
 	if !quiet {
-		fmt.Println("Searching continuously (Ctrl+C to stop)...")
+		if multiMode && !loop {
+			fmt.Printf("Searching for %d patterns (Ctrl+C to stop)...\n", totalPatterns)
+		} else {
+			fmt.Println("Searching continuously (Ctrl+C to stop)...")
+		}
 	}
 
 	onProgress := func(stats generatorStats) {
 		if quiet {
 			return
 		}
-		fmt.Fprintf(os.Stderr,
-			"\r  Checked: %s  |  Rate: %s/sec  |  Elapsed: %s  |  Found: %d  ",
-			formatNumber(int64(stats.TotalChecked)),
-			formatRate(stats.Rate),
-			formatTime(stats.Elapsed),
-			foundCount,
-		)
+		if multiMode {
+			satisfied := len(foundPerPattern)
+			fmt.Fprintf(os.Stderr,
+				"\r  Checked: %s  |  Rate: %s/sec  |  Elapsed: %s  |  Found: %d (%d/%d patterns)  ",
+				formatNumber(int64(stats.TotalChecked)),
+				formatRate(stats.Rate),
+				formatTime(stats.Elapsed),
+				foundCount,
+				satisfied,
+				totalPatterns,
+			)
+		} else {
+			fmt.Fprintf(os.Stderr,
+				"\r  Checked: %s  |  Rate: %s/sec  |  Elapsed: %s  |  Found: %d  ",
+				formatNumber(int64(stats.TotalChecked)),
+				formatRate(stats.Rate),
+				formatTime(stats.Elapsed),
+				foundCount,
+			)
+		}
 	}
 
 	onResult := func(result *generatorResult) {
 		foundCount++
+		foundPerPattern[result.PatternIdx]++
+		isDuplicate := foundPerPattern[result.PatternIdx] > 1
+
 		export := prepareExport(result.PrivateKey, result.IdentityHash, result.DestType, result.DestHashHex)
 
 		if err := appendResultJSONL(jsonlPath, export, result); err != nil {
@@ -290,20 +334,44 @@ func runLoopMode(gen *vanityGenerator, ctx context.Context, mode matchMode, outp
 			fmt.Println(result.DestHashHex)
 		} else {
 			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Printf("  [Match #%d] %s  (%s, %s checked)\n",
-				foundCount,
-				result.DestHashHex,
-				formatTime(result.Elapsed),
-				formatNumber(int64(result.TotalChecked)),
-			)
+			dupTag := ""
+			if isDuplicate {
+				dupTag = " (duplicate)"
+			}
+			if multiMode {
+				fmt.Printf("  [Match #%d] %s  pattern='%s'%s  (%s, %s checked)\n",
+					foundCount,
+					result.DestHashHex,
+					result.PatternStr,
+					dupTag,
+					formatTime(result.Elapsed),
+					formatNumber(int64(result.TotalChecked)),
+				)
+			} else {
+				fmt.Printf("  [Match #%d] %s  (%s, %s checked)\n",
+					foundCount,
+					result.DestHashHex,
+					formatTime(result.Elapsed),
+					formatNumber(int64(result.TotalChecked)),
+				)
+			}
+		}
+
+		// Auto-stop when all patterns satisfied (multi-pattern without loop)
+		if multiMode && !loop && len(foundPerPattern) >= totalPatterns {
+			searchCancel()
 		}
 	}
 
-	gen.runLoop(ctx, 500*time.Millisecond, onProgress, onResult)
+	gen.runLoop(searchCtx, 500*time.Millisecond, onProgress, onResult)
 
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "\n")
-		fmt.Printf("\nSearch stopped. Found %d matching identities.\n", foundCount)
+		fmt.Printf("\nSearch stopped. Found %d matching identities", foundCount)
+		if multiMode {
+			fmt.Printf(" across %d/%d patterns", len(foundPerPattern), totalPatterns)
+		}
+		fmt.Println(".")
 		fmt.Printf("Results: %s\n", jsonlPath)
 	}
 }

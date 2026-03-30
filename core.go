@@ -52,6 +52,7 @@ type keyResult struct {
 	PrivateKey   [64]byte
 	IdentityHash [16]byte
 	DestHex      string
+	PatternIdx   int
 }
 
 // scalarBaseMult computes the X25519 public key from a private scalar
@@ -127,9 +128,9 @@ func (w *workerState) fillRand(p []byte) {
 }
 
 // generateAndCheck generates one X25519 key pair, computes the destination
-// hash (using the pre-generated Ed25519 key), and checks it against the
-// compiled pattern. Only allocates on match.
-func (w *workerState) generateAndCheck(cp *compiledPattern) (keyResult, bool) {
+// hash (using the pre-generated Ed25519 key), and checks it against all
+// compiled patterns. Only allocates on match.
+func (w *workerState) generateAndCheck(patterns []*compiledPattern) (keyResult, bool) {
 	// Generate 32 random bytes for X25519 scalar
 	w.fillRand(w.xScalar[:])
 
@@ -145,23 +146,26 @@ func (w *workerState) generateAndCheck(cp *compiledPattern) (keyResult, bool) {
 	copy(w.destInput[NameHashLen:], idFull[:TruncatedLen])
 	destFull := sha256.Sum256(w.destInput[:])
 
-	if cp.matchesHash(destFull[:TruncatedLen]) {
-		// Match — build full result (allocations fine here, happens once)
-		var privKey [64]byte
-		copy(privKey[:32], w.xScalar[:])
-		copy(privKey[32:], w.edSeed[:])
+	for i, cp := range patterns {
+		if cp.matchesHash(destFull[:TruncatedLen]) {
+			// Match — build full result (allocations fine here, happens rarely)
+			var privKey [64]byte
+			copy(privKey[:32], w.xScalar[:])
+			copy(privKey[32:], w.edSeed[:])
 
-		var identityHash [16]byte
-		copy(identityHash[:], idFull[:TruncatedLen])
+			var identityHash [16]byte
+			copy(identityHash[:], idFull[:TruncatedLen])
 
-		var hexBuf [32]byte
-		hex.Encode(hexBuf[:], destFull[:TruncatedLen])
+			var hexBuf [32]byte
+			hex.Encode(hexBuf[:], destFull[:TruncatedLen])
 
-		return keyResult{
-			PrivateKey:   privKey,
-			IdentityHash: identityHash,
-			DestHex:      string(hexBuf[:]),
-		}, true
+			return keyResult{
+				PrivateKey:   privKey,
+				IdentityHash: identityHash,
+				DestHex:      string(hexBuf[:]),
+				PatternIdx:   i,
+			}, true
+		}
 	}
 
 	return keyResult{}, false
