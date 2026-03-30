@@ -37,6 +37,7 @@ type vanityGenerator struct {
 	DestType   string
 	NumWorkers int
 
+	loopMode  bool
 	counter   atomic.Uint64
 	startTime time.Time
 	cancel    context.CancelFunc
@@ -79,7 +80,11 @@ func newVanityGenerator(pattern string, mode matchMode, destType string, numWork
 // start launches worker goroutines.
 func (g *vanityGenerator) start(parentCtx context.Context) {
 	g.ctx, g.cancel = context.WithCancel(parentCtx)
-	g.resultCh = make(chan keyResult, 1)
+	bufSize := 1
+	if g.loopMode {
+		bufSize = 64
+	}
+	g.resultCh = make(chan keyResult, bufSize)
 	g.startTime = time.Now()
 	g.counter.Store(0)
 
@@ -90,10 +95,11 @@ func (g *vanityGenerator) start(parentCtx context.Context) {
 }
 
 // worker runs a tight key generation loop until a match is found or context is cancelled.
+// In loop mode, workers continue searching after each match.
 func (g *vanityGenerator) worker() {
 	defer g.wg.Done()
 
-	nameHash := g.NameHash
+	w := newWorkerState(g.NameHash)
 	pattern := g.Pattern
 	const batchSize = 500
 
@@ -104,10 +110,22 @@ func (g *vanityGenerator) worker() {
 		default:
 		}
 
+		found := false
 		for i := 0; i < batchSize; i++ {
-			result := generateAndHash(nameHash)
-			if pattern.matches(result.DestHex) {
+			result, matched := w.generateAndCheck(pattern)
+			if matched {
 				g.counter.Add(uint64(i + 1))
+				if g.loopMode {
+					select {
+					case g.resultCh <- result:
+					case <-g.ctx.Done():
+						return
+					}
+					// Fresh key pair for next search
+					w = newWorkerState(g.NameHash)
+					found = true
+					break
+				}
 				select {
 				case g.resultCh <- result:
 				default:
@@ -116,7 +134,9 @@ func (g *vanityGenerator) worker() {
 				return
 			}
 		}
-		g.counter.Add(batchSize)
+		if !found {
+			g.counter.Add(batchSize)
+		}
 	}
 }
 
@@ -180,6 +200,46 @@ func (g *vanityGenerator) runBlocking(parentCtx context.Context, progressInterva
 			// External cancellation (e.g., Ctrl+C)
 			g.stop()
 			return nil
+		}
+	}
+}
+
+// runLoop runs the generator continuously, calling onResult for each match.
+// Returns when the context is cancelled (e.g., Ctrl+C).
+func (g *vanityGenerator) runLoop(parentCtx context.Context, progressInterval time.Duration, onProgress func(generatorStats), onResult func(*generatorResult)) {
+	g.loopMode = true
+	g.start(parentCtx)
+	defer g.stop()
+
+	ticker := time.NewTicker(progressInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case result := <-g.resultCh:
+			elapsed := time.Since(g.startTime)
+			total := g.counter.Load()
+			rate := 0.0
+			if elapsed > 0 {
+				rate = float64(total) / elapsed.Seconds()
+			}
+			onResult(&generatorResult{
+				PrivateKey:   result.PrivateKey,
+				IdentityHash: result.IdentityHash,
+				DestHashHex:  result.DestHex,
+				DestType:     g.DestType,
+				Elapsed:      elapsed,
+				TotalChecked: total,
+				Rate:         rate,
+			})
+
+		case <-ticker.C:
+			if onProgress != nil {
+				onProgress(g.stats())
+			}
+
+		case <-parentCtx.Done():
+			return
 		}
 	}
 }

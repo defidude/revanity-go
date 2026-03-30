@@ -4,10 +4,12 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // exportedIdentity holds all information about an exported identity.
@@ -119,4 +121,49 @@ func saveIdentityText(export *exportedIdentity, path string) (string, error) {
 	}
 
 	return absPath, nil
+}
+
+// resultEntry is the JSON structure for each line in the JSONL results file.
+type resultEntry struct {
+	DestHash         string            `json:"dest_hash"`
+	IdentityHash     string            `json:"identity_hash"`
+	DestHashes       map[string]string `json:"dest_hashes"`
+	PrivateKeyHex    string            `json:"private_key_hex"`
+	PrivateKeyBase32 string            `json:"private_key_base32"`
+	PrivateKeyBase64 string            `json:"private_key_base64"`
+	FoundAt          string            `json:"found_at"`
+	TotalChecked     uint64            `json:"total_checked"`
+	Rate             float64           `json:"rate"`
+	ElapsedSeconds   float64           `json:"elapsed_seconds"`
+}
+
+// appendResultJSONL appends an identity result as a JSON line to the given file.
+func appendResultJSONL(path string, export *exportedIdentity, result *generatorResult) error {
+	entry := resultEntry{
+		DestHash:         result.DestHashHex,
+		IdentityHash:     export.IdentityHashHex,
+		DestHashes:       export.DestHashes,
+		PrivateKeyHex:    export.PrivateKeyHex,
+		PrivateKeyBase32: export.PrivateKeyBase32,
+		PrivateKeyBase64: export.PrivateKeyBase64,
+		FoundAt:          time.Now().UTC().Format(time.RFC3339),
+		TotalChecked:     result.TotalChecked,
+		Rate:             result.Rate,
+		ElapsedSeconds:   result.Elapsed.Seconds(),
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	data = append(data, '\n')
+	_, err = f.Write(data)
+	return err
 }

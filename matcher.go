@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"regexp"
@@ -36,6 +38,17 @@ type compiledPattern struct {
 	mode    matchMode
 	pattern string
 	regex   *regexp.Regexp
+
+	// Byte-level matching for prefix/suffix (avoids hex encoding in hot path)
+	bytePattern []byte // full bytes to compare
+	byteOffset  int    // offset in hash where comparison starts
+	nibbleCheck bool   // whether there's an extra nibble to verify
+	nibbleIdx   int    // byte index in hash for the nibble
+	nibbleMask  byte   // 0xf0 (high nibble) or 0x0f (low nibble)
+	nibbleValue byte   // expected value after masking
+
+	// For contains mode: pattern as raw ASCII hex bytes
+	patternHex []byte
 }
 
 // newCompiledPattern creates a compiled pattern from a mode and pattern string.
@@ -59,10 +72,99 @@ func newCompiledPattern(mode matchMode, pattern string) (*compiledPattern, error
 		return nil, err
 	}
 	cp.pattern = cleaned
+
+	switch mode {
+	case modePrefix:
+		cp.setupPrefixBytes(cleaned)
+	case modeSuffix:
+		cp.setupSuffixBytes(cleaned)
+	case modeContains:
+		cp.patternHex = []byte(cleaned)
+	}
+
 	return cp, nil
 }
 
-// matches tests if a 32-char lowercase hex address matches the pattern.
+// setupPrefixBytes prepares byte-level prefix matching.
+// Even-length: compare full bytes at start of hash.
+// Odd-length: compare full bytes + check high nibble of the next byte.
+func (cp *compiledPattern) setupPrefixBytes(hexStr string) {
+	n := len(hexStr)
+	nFull := n / 2
+	if nFull > 0 {
+		cp.bytePattern, _ = hex.DecodeString(hexStr[:nFull*2])
+		cp.byteOffset = 0
+	}
+	if n%2 == 1 {
+		cp.nibbleCheck = true
+		cp.nibbleIdx = nFull
+		cp.nibbleMask = 0xf0
+		cp.nibbleValue = hexNibble(hexStr[n-1]) << 4
+	}
+}
+
+// setupSuffixBytes prepares byte-level suffix matching.
+// Even-length: compare full bytes at end of hash.
+// Odd-length: check low nibble of the byte before full bytes, then compare full bytes.
+func (cp *compiledPattern) setupSuffixBytes(hexStr string) {
+	n := len(hexStr)
+	nFull := n / 2
+
+	if n%2 == 1 {
+		cp.nibbleCheck = true
+		cp.nibbleIdx = TruncatedLen - nFull - 1
+		cp.nibbleMask = 0x0f
+		cp.nibbleValue = hexNibble(hexStr[0])
+		if nFull > 0 {
+			cp.bytePattern, _ = hex.DecodeString(hexStr[1:])
+			cp.byteOffset = TruncatedLen - nFull
+		}
+	} else if nFull > 0 {
+		cp.bytePattern, _ = hex.DecodeString(hexStr)
+		cp.byteOffset = TruncatedLen - nFull
+	}
+}
+
+// hexNibble converts a lowercase hex char to its 4-bit value.
+func hexNibble(c byte) byte {
+	if c >= '0' && c <= '9' {
+		return c - '0'
+	}
+	return c - 'a' + 10
+}
+
+// matchesHash checks a 16-byte raw hash against the pattern.
+// For prefix/suffix: compares bytes directly (no hex encoding on the hot path).
+// For contains/regex: hex-encodes into a stack-allocated buffer.
+func (cp *compiledPattern) matchesHash(hash []byte) bool {
+	switch cp.mode {
+	case modePrefix, modeSuffix:
+		if len(cp.bytePattern) > 0 {
+			if !bytes.Equal(hash[cp.byteOffset:cp.byteOffset+len(cp.bytePattern)], cp.bytePattern) {
+				return false
+			}
+		}
+		if cp.nibbleCheck {
+			if hash[cp.nibbleIdx]&cp.nibbleMask != cp.nibbleValue {
+				return false
+			}
+		}
+		return true
+
+	case modeContains:
+		var buf [32]byte
+		hex.Encode(buf[:], hash)
+		return bytes.Contains(buf[:], cp.patternHex)
+
+	case modeRegex:
+		var buf [32]byte
+		hex.Encode(buf[:], hash)
+		return cp.regex.Match(buf[:])
+	}
+	return false
+}
+
+// matches tests if a 32-char lowercase hex address matches the pattern (non-hot-path).
 func (cp *compiledPattern) matches(hexAddr string) bool {
 	switch cp.mode {
 	case modePrefix:
@@ -96,10 +198,10 @@ func validateHexPattern(pattern string) (string, error) {
 
 // difficulty holds the result of a difficulty estimation.
 type difficulty struct {
-	ExpectedAttempts     int64
-	SecondsPerCore       float64
-	DifficultyDesc       string
-	CanEstimate          bool
+	ExpectedAttempts int64
+	SecondsPerCore   float64
+	DifficultyDesc   string
+	CanEstimate      bool
 }
 
 // estimateDifficulty estimates expected attempts and time to find a match.

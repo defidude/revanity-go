@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -48,6 +49,7 @@ func main() {
 	dest := flag.String("dest", "lxmf.delivery", "Destination type")
 	workers := flag.Int("workers", 0, "Number of worker goroutines (default: auto)")
 	output := flag.String("output", "", "Output file path prefix (default: ./<dest_hash>)")
+	loop := flag.Bool("loop", false, "Search continuously, saving each match")
 	dryRun := flag.Bool("dry-run", false, "Show difficulty estimate without searching")
 	quiet := flag.Bool("quiet", false, "Minimal output (just the result address)")
 	showVersion := flag.Bool("version", false, "Show version")
@@ -60,6 +62,7 @@ func main() {
 	flag.StringVar(dest, "d", "lxmf.delivery", "")
 	flag.IntVar(workers, "w", 0, "")
 	flag.StringVar(output, "o", "", "")
+	flag.BoolVar(loop, "l", false, "")
 	flag.BoolVar(quiet, "q", false, "")
 
 	flag.Usage = func() {
@@ -73,7 +76,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		fmt.Fprintf(os.Stderr, "  -dest, -d TYPE       Destination type (default: lxmf.delivery)\n")
 		fmt.Fprintf(os.Stderr, "  -workers, -w NUM     Number of worker goroutines (default: auto)\n")
-		fmt.Fprintf(os.Stderr, "  -output, -o PATH     Output file path prefix (default: ./<dest_hash>)\n")
+		fmt.Fprintf(os.Stderr, "  -output, -o PATH     Output directory for loop mode (default: results/)\n")
+		fmt.Fprintf(os.Stderr, "  -loop, -l            Search continuously, saving each match\n")
 		fmt.Fprintf(os.Stderr, "  -dry-run             Show difficulty estimate without searching\n")
 		fmt.Fprintf(os.Stderr, "  -quiet, -q           Minimal output (just the result address)\n")
 		fmt.Fprintf(os.Stderr, "  -version             Show version\n\n")
@@ -82,6 +86,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  revanity-go -suffix cafe -workers 8\n")
 		fmt.Fprintf(os.Stderr, "  revanity-go -contains beef\n")
 		fmt.Fprintf(os.Stderr, "  revanity-go -regex \"^(dead|beef)\"\n")
+		fmt.Fprintf(os.Stderr, "  revanity-go -prefix dead -loop    # find all matches continuously\n")
 	}
 
 	flag.Parse()
@@ -141,8 +146,11 @@ func main() {
 		fmt.Printf("  Pattern:     %s='%s'\n", mode, gen.PatternStr)
 		fmt.Printf("  Destination: %s\n", *dest)
 		fmt.Printf("  Workers:     %d\n", gen.NumWorkers)
+		if *loop {
+			fmt.Printf("  Mode:        continuous (loop)\n")
+		}
 		if diff.CanEstimate {
-			fmt.Printf("  Expected:    ~%s attempts\n", formatNumber(diff.ExpectedAttempts))
+			fmt.Printf("  Expected:    ~%s attempts per match\n", formatNumber(diff.ExpectedAttempts))
 		}
 		fmt.Printf("  Difficulty:  %s\n", diff.DifficultyDesc)
 		fmt.Println()
@@ -152,13 +160,18 @@ func main() {
 		os.Exit(0)
 	}
 
-	if !*quiet {
-		fmt.Println("Searching...")
-	}
-
 	// Handle Ctrl+C gracefully
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	if *loop {
+		runLoopMode(gen, ctx, mode, *output, *quiet)
+		return
+	}
+
+	if !*quiet {
+		fmt.Println("Searching...")
+	}
 
 	// Progress callback
 	onProgress := func(stats generatorStats) {
@@ -227,6 +240,71 @@ func main() {
 
 	if *quiet {
 		fmt.Println(result.DestHashHex)
+	}
+}
+
+func runLoopMode(gen *vanityGenerator, ctx context.Context, mode matchMode, output string, quiet bool) {
+	outDir := output
+	if outDir == "" {
+		outDir = "results"
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating output directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	jsonlPath := filepath.Join(outDir, fmt.Sprintf("%s_%s.jsonl", mode, gen.PatternStr))
+	foundCount := 0
+
+	if !quiet {
+		fmt.Println("Searching continuously (Ctrl+C to stop)...")
+	}
+
+	onProgress := func(stats generatorStats) {
+		if quiet {
+			return
+		}
+		fmt.Fprintf(os.Stderr,
+			"\r  Checked: %s  |  Rate: %s/sec  |  Elapsed: %s  |  Found: %d  ",
+			formatNumber(int64(stats.TotalChecked)),
+			formatRate(stats.Rate),
+			formatTime(stats.Elapsed),
+			foundCount,
+		)
+	}
+
+	onResult := func(result *generatorResult) {
+		foundCount++
+		export := prepareExport(result.PrivateKey, result.IdentityHash, result.DestType, result.DestHashHex)
+
+		if err := appendResultJSONL(jsonlPath, export, result); err != nil {
+			fmt.Fprintf(os.Stderr, "\nError saving result: %v\n", err)
+		}
+
+		identityPath := filepath.Join(outDir, result.DestHashHex+".identity")
+		if _, err := saveIdentityFile(result.PrivateKey, identityPath); err != nil {
+			fmt.Fprintf(os.Stderr, "\nError saving identity file: %v\n", err)
+		}
+
+		if quiet {
+			fmt.Println(result.DestHashHex)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Printf("  [Match #%d] %s  (%s, %s checked)\n",
+				foundCount,
+				result.DestHashHex,
+				formatTime(result.Elapsed),
+				formatNumber(int64(result.TotalChecked)),
+			)
+		}
+	}
+
+	gen.runLoop(ctx, 500*time.Millisecond, onProgress, onResult)
+
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Printf("\nSearch stopped. Found %d matching identities.\n", foundCount)
+		fmt.Printf("Results: %s\n", jsonlPath)
 	}
 }
 
